@@ -13,7 +13,7 @@ from datetime import datetime
 current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
 
 import pyvisa
-from pymeasure.instruments.keithley import KeithleyDMM6500
+from pymeasure.instruments.keithley import Keithley2182
 import serial
 import numpy as np
 import threading
@@ -25,17 +25,17 @@ class OverallProcedure(Procedure):
     Temperature = FloatParameter('Temperature', units='K', default=298)
     HoldTime = FloatParameter('HoldTime', units='s', default=60)
 
-    inst_select = ListParameter('TemperatureController', choices=['TC290', 'Tmon8'], default='Tmon8')
-    addr_tempContr = Parameter('TmpContr_addr', default="ASRL6::INSTR")
-    addr_2182 = Parameter('Inst_addr', default="USB0::0x05E6::0x6500::04429375::INSTR")
-    addr_port = Parameter('Port', default="DISABLED")
+    inst_select = ListParameter('TemperatureController', choices=['TC290', 'Tmon8'], default='TC290')
+    addr_tempContr = Parameter('TmpContr_addr', default="ASRL3::INSTR")
+    addr_2182 = Parameter('Inst_addr', default="GPIB::22")
+    addr_port = Parameter('Port', default="COM7")
     trim = Parameter('Trim', default="0, 20, 1")
 
     DATA_COLUMNS = ['Time (s)', 'Temperature (K)', 'Trim', 'Voltage (V)']
 
     def startup(self):
         log.info("Connecting to instruments...")
-        self.instrument_lock = threading.RLock()
+        self.instrument_lock = threading.Lock()
 
         # MODIFICATION START: Add a flag to control the monitoring thread's output
         self.is_scanning = False
@@ -49,21 +49,15 @@ class OverallProcedure(Procedure):
         identity = self.tempContr.query('*IDN?').strip()
         log.info(f"Connected to {identity}")
         
-        self.nanovoltmeter = KeithleyDMM6500(self.addr_2182)
+        self.nanovoltmeter = Keithley2182(self.addr_2182)
         self.nanovoltmeter.adapter.connection.timeout = 10000
         self.nanovoltmeter.reset()
-        self.nanovoltmeter.write(":SENS:FUNC 'VOLT:DC'")
-        self.nanovoltmeter.write(":SENS:VOLT:DC:RANG:AUTO ON")
-        self.nanovoltmeter.write(":SENS:VOLT:DC:NPLC 1")
-        log.info(f"Connected to Keithley DMM6500 at {self.addr_2182}")
+        self.nanovoltmeter.thermocouple = 'S'
+        self.nanovoltmeter.ch_1.setup_voltage()
+        log.info(f"Connected to Keithley 2182 at {self.addr_2182}")
         
-        if str(self.addr_port).upper() == "DISABLED":
-            self.ser = None
-            log.info("Trim serial disabled.")
-        else:
-            self.ser = serial.Serial(port=self.addr_port, baudrate=115200, timeout=0.2)
-            log.info(f"Opened COM port at {self.addr_port}")
-
+        self.ser = serial.Serial(port=self.addr_port, baudrate=115200, timeout=0.2)
+        log.info(f"Opened COM port at {self.addr_port}")
 
         self.monitoring_running = True
         self.monitoring_thread = threading.Thread(target=self._monitor_instruments)
@@ -87,7 +81,7 @@ class OverallProcedure(Procedure):
 
                 with self.instrument_lock:
                     current_temp = self._temp_get_unlocked()
-                    voltage = float(self.nanovoltmeter.ask(":READ?"))
+                    voltage = self.nanovoltmeter.voltage
                 
                 elapsed_time = time() - OverallProcedure._overall_start_time
                 
@@ -111,9 +105,7 @@ class OverallProcedure(Procedure):
             if self.inst_select == 'TC290':
                 self.tempContr.write(f'SETP 1,{tempSet}')
             elif self.inst_select == 'Tmon8':
-                cmd = f"SETP1,{float(tempSet):.2f}\r\n".encode("ascii")
-                self.tempContr.write_raw(cmd)
-                log.info(f"Tmon8 setpoint command sent: {cmd}")
+                self.tempContr.write(f'SETP 1,{tempSet}\r\n')
 
     def _temp_get_unlocked(self):
         if self.inst_select == 'TC290':
@@ -156,16 +148,11 @@ class OverallProcedure(Procedure):
 
     def port_sendCommand(self, num):
         with self.instrument_lock:
-            if self.ser is None:
-                log.info(f"Trim serial disabled, skip Trim:{num}")
-                return
             command = f"Trim:{num}\r\n"
-            self.ser.write(command.encode('ascii')) 
+            self.ser.write(command.encode('ascii'))      
             
     def port_receive(self):
         with self.instrument_lock:
-            if self.ser is None:
-                return ["Trim serial disabled"]
             response_lines = []
             empty_read_count = 0
             max_empty_reads = 3
@@ -224,8 +211,7 @@ class OverallProcedure(Procedure):
                     break
                 
                 with self.instrument_lock:
-                    if self.ser is not None:
-                        self.ser.reset_input_buffer()
+                    self.ser.reset_input_buffer()
 
                 self.port_sendCommand(Trim)
                 sleep(0.2)
@@ -235,7 +221,7 @@ class OverallProcedure(Procedure):
                 log.info(f"Received from COM port for Trim={Trim}:\n---\n{full_response_str}\n---")
 
                 with self.instrument_lock:
-                    voltage = float(self.nanovoltmeter.ask(":READ?"))
+                    voltage = self.nanovoltmeter.voltage
                     current_temp = self._temp_get_unlocked()
 
                 if voltage >= 9.9e37:
@@ -270,7 +256,7 @@ class OverallProcedure(Procedure):
             self.tempContr.close()
         if hasattr(self, 'nanovoltmeter'):
             self.nanovoltmeter.shutdown()
-        if hasattr(self, 'ser') and self.ser is not None and self.ser.is_open:
+        if hasattr(self, 'ser') and self.ser.is_open:
             self.ser.close()
         log.info("Shutdown complete.")
 
