@@ -9,15 +9,39 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Logs and generated data
+# Python/tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs
 logs/
-data/
-results/
 *.log
 
-# Local config
+# Local secrets/config
 .env
+*.env
 config.local.json
+config.private.json
 
-# IDE
+# IDE/editor
 .vscode/
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IMPORTANT:
+# Do NOT ignore measurement output data.
+# Keep these tracked if they exist:
+# measurements_trim/
+# *.csv
+# *.json
+# *.xlsx
